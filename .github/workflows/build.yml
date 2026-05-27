@@ -38,7 +38,7 @@ jobs:
           echo "signing.key.password=${{ secrets.KEYSTORE_PASSWORD }}" >> gradle.properties
 
       - name: Build signed APK
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease --info
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
