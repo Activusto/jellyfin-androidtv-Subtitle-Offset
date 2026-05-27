@@ -1,0 +1,731 @@
+diff --git a/app/src/main/java/org/jellyfin/androidtv/preference/UserPreferences.kt b/app/src/main/java/org/jellyfin/androidtv/preference/UserPreferences.kt
+index a482f4b..2fadbc5 100644
+--- a/app/src/main/java/org/jellyfin/androidtv/preference/UserPreferences.kt
++++ b/app/src/main/java/org/jellyfin/androidtv/preference/UserPreferences.kt
+@@ -254,6 +254,22 @@ class UserPreferences(context: Context) : SharedPreferenceStore(
+ 		 * Enable PGS subtitle direct-play.
+ 		 */
+ 		var pgsDirectPlay = booleanPreference("pgs_enabled", true)
++
++		/* Luxia Theme */
++		/**
++		 * Enable Luxia Temple theme
++		 */
++		var luxiaThemeEnabled = booleanPreference("luxia_theme_enabled", false)
++
++		/**
++		 * Enable flame overlay in Luxia theme
++		 */
++		var luxiaFlameOverlayEnabled = booleanPreference("luxia_flame_overlay_enabled", true)
++
++		/**
++		 * Enable spotlight overlay in Luxia theme
++		 */
++		var luxiaSpotlightEnabled = booleanPreference("luxia_spotlight_enabled", true)
+ 	}
+ 
+ 	init {
+diff --git a/app/src/main/java/org/jellyfin/androidtv/theme/FlameOverlayView.kt b/app/src/main/java/org/jellyfin/androidtv/theme/FlameOverlayView.kt
+new file mode 100644
+index 0000000..c514800
+--- /dev/null
++++ b/app/src/main/java/org/jellyfin/androidtv/theme/FlameOverlayView.kt
+@@ -0,0 +1,81 @@
++package org.jellyfin.androidtv.theme
++
++import android.content.Context
++import android.graphics.BlurMaskFilter
++import android.graphics.Canvas
++import android.graphics.Color
++import android.graphics.Paint
++import android.util.AttributeSet
++import android.view.Choreographer
++import android.view.View
++import kotlin.math.max
++import kotlin.math.min
++
++/**
++ * Flame overlay - rising embers for Luxia Temple theme.
++ * Canvas-based, 30fps cap, 12-15 particles max for Firestick performance.
++ * Only visible on home screen - hidden during playback.
++ */
++class FlameOverlayView @JvmOverloads constructor(
++    context: Context,
++    attrs: AttributeSet? = null
++) : View(context, attrs) {
++
++    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
++        style = Paint.Style.FILL
++    }
++
++    private val particles = mutableListOf<FlameParticle>()
++
++    init {
++        // Initialize 12 particles (performance-safe for Firestick)
++        repeat(12) {
++            particles.add(FlameParticle())
++        }
++
++        // Start animation loop at 30fps
++        Choreographer.getInstance().postFrameCallback { frame ->
++            updateParticles()
++            invalidate()
++            if (visibility == View.VISIBLE) {
++                Choreographer.getInstance().postFrameCallback { frame }
++            }
++        }
++    }
++
++    private fun updateParticles() {
++        particles.forEach { it.update() }
++    }
++
++    override fun onDraw(canvas: Canvas) {
++        super.onDraw(canvas)
++        particles.forEach { it.draw(canvas, paint) }
++    }
++
++    private data class FlameParticle(
++        var x: Float = (0..1000).random().toFloat(),
++        var y: Float = (800..1200).random().toFloat(),
++        var size: Float = (4..8).random().toFloat(),
++        var speed: Float = (50..100).random().toFloat(),
++        var alpha: Float = 1.0f
++    ) {
++        fun update() {
++            y -= speed / 60f // Rise
++            alpha -= 0.002f // Fade
++            if (alpha <= 0 || y < 0) {
++                // Respawn at bottom
++                y = 1200f
++                alpha = 1.0f
++                x = (0..1000).random().toFloat()
++            }
++        }
++
++        fun draw(canvas: Canvas, paint: Paint) {
++            // Amber to orange gradient effect via alpha
++            val amber = Color.parseColor("#FFFFB347")
++            paint.color = amber
++            paint.alpha = (alpha * 255).toInt()
++            canvas.drawCircle(x, y, size, paint)
++        }
++    }
++}
+diff --git a/app/src/main/java/org/jellyfin/androidtv/theme/LuxiaThemeManager.kt b/app/src/main/java/org/jellyfin/androidtv/theme/LuxiaThemeManager.kt
+new file mode 100644
+index 0000000..8271473
+--- /dev/null
++++ b/app/src/main/java/org/jellyfin/androidtv/theme/LuxiaThemeManager.kt
+@@ -0,0 +1,107 @@
++package org.jellyfin.androidtv.theme
++
++import android.app.Activity
++import android.content.Context
++import android.view.View
++import android.view.ViewGroup
++import android.widget.FrameLayout
++import org.jellyfin.androidtv.preference.UserPreferences
++
++/**
++ * Luxia Temple Theme Manager - applies and removes the Luxia theme.
++ * Handles flame overlay and spotlight overlay lifecycle.
++ */
++object LuxiaThemeManager {
++
++    private var flameOverlay: FlameOverlayView? = null
++    private var spotlightOverlay: SpotlightOverlayView? = null
++
++    fun apply(context: Context, enabled: Boolean) {
++        if (enabled) {
++            // Apply Luxia theme
++            context.setTheme(org.jellyfin.androidtv.R.style.LuxiaTheme)
++        } else {
++            // Revert to stock
++            context.setTheme(org.jellyfin.androidtv.R.style.Theme_Jellyfin)
++        }
++    }
++
++    /**
++     * Add flame overlay to home screen.
++     * Call once during home screen setup.
++     */
++    fun enableFlameOverlay(parent: ViewGroup) {
++        // Check if already added
++        if (flameOverlay != null) return
++
++        flameOverlay = FlameOverlayView(parent.context).apply {
++            id = View.generateViewId()
++            layoutParams = FrameLayout.LayoutParams(
++                FrameLayout.LayoutParams.MATCH_PARENT,
++                FrameLayout.LayoutParams.MATCH_PARENT
++            )
++            isClickable = false
++            isFocusable = false
++        }
++
++        parent.addView(flameOverlay)
++    }
++
++    /**
++     * Remove flame overlay.
++     * Call when leaving home screen or disabling theme.
++     */
++    fun disableFlameOverlay(parent: ViewGroup) {
++        flameOverlay?.let {
++            parent.removeView(it)
++            flameOverlay = null
++        }
++    }
++
++    /**
++     * Add spotlight overlay to home screen.
++     * Call once during home screen setup.
++     */
++    fun enableSpotlight(parent: ViewGroup): SpotlightOverlayView {
++        // Check if already added
++        spotlightOverlay?.let { return it }
++
++        spotlightOverlay = SpotlightOverlayView(parent.context).apply {
++            id = View.generateViewId()
++            layoutParams = FrameLayout.LayoutParams(
++                FrameLayout.LayoutParams.MATCH_PARENT,
++                FrameLayout.LayoutParams.MATCH_PARENT
++            )
++            isClickable = false
++            isFocusable = false
++        }
++
++        parent.addView(spotlightOverlay)
++        return spotlightOverlay!!
++    }
++
++    /**
++     * Remove spotlight overlay.
++     * Call when leaving home screen or disabling theme.
++     */
++    fun disableSpotlight(parent: ViewGroup) {
++        spotlightOverlay?.let {
++            parent.removeView(it)
++            spotlightOverlay = null
++        }
++    }
++
++    /**
++     * Hide flames during playback (no distraction).
++     */
++    fun hideFlames() {
++        flameOverlay?.visibility = View.GONE
++    }
++
++    /**
++     * Show flames (home screen).
++     */
++    fun showFlames() {
++        flameOverlay?.visibility = View.VISIBLE
++    }
++}
+diff --git a/app/src/main/java/org/jellyfin/androidtv/theme/SpotlightOverlayView.kt b/app/src/main/java/org/jellyfin/androidtv/theme/SpotlightOverlayView.kt
+new file mode 100644
+index 0000000..be8a513
+--- /dev/null
++++ b/app/src/main/java/org/jellyfin/androidtv/theme/SpotlightOverlayView.kt
+@@ -0,0 +1,61 @@
++package org.jellyfin.androidtv.theme
++
++import android.animation.ValueAnimator
++import android.content.Context
++import android.graphics.BlurMaskFilter
++import android.graphics.Canvas
++import android.graphics.Color
++import android.graphics.Paint
++import android.util.AttributeSet
++import android.view.View
++
++/**
++ * Spotlight overlay - amber glow that follows focus for Luxia Temple theme.
++ * 150dp radius, 30% opacity, smooth interpolation (200ms).
++ */
++class SpotlightOverlayView @JvmOverloads constructor(
++    context: Context,
++    attrs: AttributeSet? = null
++) : View(context, attrs) {
++
++    private val spotlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
++        color = Color.parseColor("#66FFB347") // 40% amber
++        maskFilter = BlurMaskFilter(150f, BlurMaskFilter.Blur.NORMAL)
++    }
++
++    private var spotlightX = 0f
++    private var spotlightY = 0f
++    private var targetX = 0f
++    private var targetY = 0f
++    private var currentAnimator: ValueAnimator? = null
++
++    fun moveTo(x: Float, y: Float) {
++        targetX = x
++        targetY = y
++
++        // Cancel existing animation
++        currentAnimator?.cancel()
++
++        // Animate to target position
++        currentAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
++            duration = 200
++            addUpdateListener { animator ->
++                val fraction = animator.animatedFraction
++                spotlightX = spotlightX + (targetX - spotlightX) * fraction
++                spotlightY = spotlightY + (targetY - spotlightY) * fraction
++                invalidate()
++            }
++            start()
++        }
++    }
++
++    override fun onDraw(canvas: Canvas) {
++        super.onDraw(canvas)
++        canvas.drawCircle(spotlightX, spotlightY, 200f, spotlightPaint)
++    }
++
++    override fun onDetachedFromWindow() {
++        super.onDetachedFromWindow()
++        currentAnimator?.cancel()
++    }
++}
+diff --git a/app/src/main/java/org/jellyfin/androidtv/ui/home/HomeRowsFragment.kt b/app/src/main/java/org/jellyfin/androidtv/ui/home/HomeRowsFragment.kt
+index 0a8ec94..99e82cc 100644
+--- a/app/src/main/java/org/jellyfin/androidtv/ui/home/HomeRowsFragment.kt
++++ b/app/src/main/java/org/jellyfin/androidtv/ui/home/HomeRowsFragment.kt
+@@ -34,6 +34,7 @@ import org.jellyfin.androidtv.data.repository.CustomMessageRepository
+ import org.jellyfin.androidtv.data.repository.NotificationsRepository
+ import org.jellyfin.androidtv.data.repository.UserViewsRepository
+ import org.jellyfin.androidtv.data.service.BackgroundService
++import org.jellyfin.androidtv.preference.UserPreferences
+ import org.jellyfin.androidtv.preference.UserSettingPreferences
+ import org.jellyfin.androidtv.ui.GridButton
+ import org.jellyfin.androidtv.ui.browsing.CompositeClickedListener
+@@ -49,6 +50,7 @@ import org.jellyfin.androidtv.ui.playback.MediaManager
+ import org.jellyfin.androidtv.ui.presentation.CardPresenter
+ import org.jellyfin.androidtv.ui.presentation.MutableObjectAdapter
+ import org.jellyfin.androidtv.ui.presentation.PositionableListRowPresenter
++import org.jellyfin.androidtv.theme.LuxiaThemeManager
+ import org.jellyfin.androidtv.util.KeyProcessor
+ import org.jellyfin.playback.core.PlaybackManager
+ import org.jellyfin.sdk.api.client.ApiClient
+@@ -73,6 +75,7 @@ class HomeRowsFragment : RowsSupportFragment(), AudioEventListener, View.OnKeyLi
+ 	private val navigationRepository by inject<NavigationRepository>()
+ 	private val itemLauncher by inject<ItemLauncher>()
+ 	private val keyProcessor by inject<KeyProcessor>()
++	private val userPreferences by inject<UserPreferences>()
+ 
+ 	private val helper by lazy { HomeFragmentHelper(requireContext(), userRepository) }
+ 
+@@ -177,6 +180,40 @@ class HomeRowsFragment : RowsSupportFragment(), AudioEventListener, View.OnKeyLi
+ 
+ 		// Subscribe to Audio messages
+ 		mediaManager.addAudioEventListener(this)
++
++		// Initialize Luxia theme overlays if enabled
++		initializeLuxiaTheme()
++	}
++
++	private fun initializeLuxiaTheme() {
++		view?.post {
++			val isLuxiaEnabled = userPreferences.luxiaThemeEnabled
++			if (isLuxiaEnabled) {
++				val contentView = view?.findViewById<android.view.ViewGroup>(android.R.id.content)
++					?: return@post
++
++				// Add flame overlay if enabled
++				if (userPreferences.luxiaFlameOverlayEnabled) {
++					LuxiaThemeManager.enableFlameOverlay(contentView)
++				}
++
++				// Add spotlight overlay if enabled
++				if (userPreferences.luxiaSpotlightEnabled) {
++					val spotlight = LuxiaThemeManager.enableSpotlight(contentView)
++					// Track focus changes for spotlight
++					view?.viewTreeObserver?.addOnFocusChangeListener { v, hasFocus ->
++						if (hasFocus) {
++							val location = IntArray(2)
++							v.getLocationOnScreen(location)
++							spotlight.moveTo(
++								location[0] + v.width / 2f,
++								location[1] + v.height / 2f
++							)
++						}
++					}
++				}
++			}
++		}
+ 	}
+ 
+ 	override fun onKey(v: View?, keyCode: Int, event: KeyEvent?): Boolean {
+diff --git a/app/src/main/java/org/jellyfin/androidtv/ui/settings/screen/customization/SettingsCustomizationScreen.kt b/app/src/main/java/org/jellyfin/androidtv/ui/settings/screen/customization/SettingsCustomizationScreen.kt
+index ed63e63..4e64395 100644
+--- a/app/src/main/java/org/jellyfin/androidtv/ui/settings/screen/customization/SettingsCustomizationScreen.kt
++++ b/app/src/main/java/org/jellyfin/androidtv/ui/settings/screen/customization/SettingsCustomizationScreen.kt
+@@ -41,6 +41,49 @@ fun SettingsCustomizationScreen() {
+ 			)
+ 		}
+ 
++		// Luxia Theme settings
++		item {
++			ListSection(
++				overlineContent = { Text(stringResource(R.string.luxia_settings_category)) },
++				headingContent = { Text(stringResource(R.string.luxia_theme_name)) }
++			)
++		}
++
++		item {
++			var luxiaThemeEnabled by rememberPreference(userPreferences, UserPreferences.luxiaThemeEnabled)
++
++			ListButton(
++				headingContent = { Text(stringResource(R.string.luxia_enable_theme)) },
++				trailingContent = { Checkbox(checked = luxiaThemeEnabled) },
++				captionContent = { Text(stringResource(R.string.luxia_theme_description)) },
++				onClick = { luxiaThemeEnabled = !luxiaThemeEnabled }
++			)
++		}
++
++		item {
++			var luxiaFlameOverlayEnabled by rememberPreference(userPreferences, UserPreferences.luxiaFlameOverlayEnabled)
++
++			ListButton(
++				headingContent = { Text(stringResource(R.string.luxia_enable_flames)) },
++				trailingContent = { Checkbox(checked = luxiaFlameOverlayEnabled) },
++				captionContent = { Text(stringResource(R.string.luxia_enable_flames_description)) },
++				onClick = { luxiaFlameOverlayEnabled = !luxiaFlameOverlayEnabled },
++				enabled = luxiaThemeEnabled
++			)
++		}
++
++		item {
++			var luxiaSpotlightEnabled by rememberPreference(userPreferences, UserPreferences.luxiaSpotlightEnabled)
++
++			ListButton(
++				headingContent = { Text(stringResource(R.string.luxia_enable_spotlight)) },
++				trailingContent = { Checkbox(checked = luxiaSpotlightEnabled) },
++				captionContent = { Text(stringResource(R.string.luxia_enable_spotlight_description)) },
++				onClick = { luxiaSpotlightEnabled = !luxiaSpotlightEnabled },
++				enabled = luxiaThemeEnabled
++			)
++		}
++
+ 		item {
+ 			var clockBehavior by rememberPreference(userPreferences, UserPreferences.clockBehavior)
+ 
+diff --git a/app/src/main/java/org/jellyfin/androidtv/ui/startup/fragment/SplashFragment.kt b/app/src/main/java/org/jellyfin/androidtv/ui/startup/fragment/SplashFragment.kt
+index f023f79..e0e437f 100644
+--- a/app/src/main/java/org/jellyfin/androidtv/ui/startup/fragment/SplashFragment.kt
++++ b/app/src/main/java/org/jellyfin/androidtv/ui/startup/fragment/SplashFragment.kt
+@@ -3,6 +3,8 @@ package org.jellyfin.androidtv.ui.startup.fragment
+ import android.os.Bundle
+ import android.view.LayoutInflater
+ import android.view.ViewGroup
++import androidx.compose.animation.core.Animatable
++import androidx.compose.animation.core.tween
+ import androidx.compose.foundation.Image
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.layout.Arrangement
+@@ -10,48 +12,84 @@ import androidx.compose.foundation.layout.Box
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.fillMaxHeight
+ import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.size
+ import androidx.compose.foundation.layout.width
+ import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.remember
+ import androidx.compose.ui.Alignment
+ import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.alpha
+ import androidx.compose.ui.res.colorResource
+ import androidx.compose.ui.res.painterResource
+ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.unit.dp
+ import androidx.fragment.app.Fragment
+ import androidx.fragment.compose.content
++import kotlinx.coroutines.delay
+ import org.jellyfin.androidtv.R
++import org.jellyfin.androidtv.preference.UserPreferences
+ import org.jellyfin.androidtv.ui.base.JellyfinTheme
++import org.koin.android.ext.android.inject
+ 
+ @Composable
+-fun SplashScreen() {
++fun SplashScreen(isLuxiaTheme: Boolean = false) {
++	val alpha = remember { Animatable(0f) }
++
++	LaunchedEffect(alpha) {
++		// Fade in
++		alpha.animateTo(1f, animationSpec = tween(800))
++		// Hold for 1 second
++		delay(1000)
++		// Fade out
++		alpha.animateTo(0f, animationSpec = tween(400))
++	}
++
+ 	Box(
+-		modifier = Modifier.background(colorResource(id = R.color.not_quite_black)),
++		modifier = Modifier
++			.background(colorResource(id = R.color.luxia_void_black))
++			.fillMaxSize(),
+ 	) {
+ 		Column(
+ 			horizontalAlignment = Alignment.CenterHorizontally,
+ 			verticalArrangement = Arrangement.Center,
+ 			modifier = Modifier.fillMaxSize(),
+ 		) {
+-			Image(
+-				painter = painterResource(R.drawable.app_logo),
+-				contentDescription = stringResource(R.string.app_name),
+-				modifier = Modifier
+-					.width(400.dp)
+-					.fillMaxHeight()
+-			)
++			if (isLuxiaTheme) {
++				// Luxia theme - show Triforce
++				Image(
++					painter = painterResource(R.drawable.triforce_splash),
++					contentDescription = "Luxia Triforce",
++					modifier = Modifier
++						.size(120.dp)
++						.alpha(alpha.value)
++				)
++			} else {
++				// Default - show Jellyfin logo
++				Image(
++					painter = painterResource(R.drawable.app_logo),
++					contentDescription = stringResource(R.string.app_name),
++					modifier = Modifier
++						.width(400.dp)
++						.fillMaxHeight()
++						.alpha(alpha.value)
++				)
++			}
+ 		}
+ 	}
+ }
+ 
+ class SplashFragment : Fragment() {
++	private val userPreferences by inject<UserPreferences>()
++
+ 	override fun onCreateView(
+ 		inflater: LayoutInflater,
+ 		container: ViewGroup?,
+ 		savedInstanceState: Bundle?
+ 	) = content {
++		val isLuxiaTheme = userPreferences.luxiaThemeEnabled
+ 		JellyfinTheme {
+-			SplashScreen()
++			SplashScreen(isLuxiaTheme)
+ 		}
+ 	}
+ }
+diff --git a/app/src/main/res/anim/triforce_rotate.xml b/app/src/main/res/anim/triforce_rotate.xml
+new file mode 100644
+index 0000000..b7b3328
+--- /dev/null
++++ b/app/src/main/res/anim/triforce_rotate.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Triforce rotation - 8 seconds per rotation (slow, meditative) -->
++<objectAnimator
++    xmlns:android="http://schemas.android.com/apk/res/android"
++    android:propertyName="rotation"
++    android:duration="8000"
++    android:valueFrom="0"
++    android:valueTo="360"
++    android:repeatCount="infinite"
++    android:interpolator="@android:interpolator/linear"/>
+diff --git a/app/src/main/res/drawable/card_border_luxia.xml b/app/src/main/res/drawable/card_border_luxia.xml
+new file mode 100644
+index 0000000..2e56532
+--- /dev/null
++++ b/app/src/main/res/drawable/card_border_luxia.xml
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Card focus border - sharp corners with amber glow on focus -->
++<selector xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:state_focused="true">
++        <shape android:shape="rectangle">
++            <solid android:color="#1A1A1A"/>
++            <stroke
++                android:width="2dp"
++                android:color="#FFB347"/>
++            <corners android:radius="0dp"/>
++        </shape>
++    </item>
++    <item>
++        <shape android:shape="rectangle">
++            <solid android:color="#1A1A1A"/>
++            <stroke
++                android:width="0dp"
++                android:color="#00000000"/>
++            <corners android:radius="0dp"/>
++        </shape>
++    </item>
++</selector>
+diff --git a/app/src/main/res/drawable/progress_luxia.xml b/app/src/main/res/drawable/progress_luxia.xml
+new file mode 100644
+index 0000000..56526dc
+--- /dev/null
++++ b/app/src/main/res/drawable/progress_luxia.xml
+@@ -0,0 +1,16 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Rotating Triforce loading spinner - 8 seconds per rotation (meditative) -->
++<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:drawable="@drawable/triforce_logo">
++
++    <target
++        android:name="top_triangle"
++        android:animation="@anim/triforce_rotate"/>
++    <target
++        android:name="bottom_left_triangle"
++        android:animation="@anim/triforce_rotate"/>
++    <target
++        android:name="bottom_right_triangle"
++        android:animation="@anim/triforce_rotate"/>
++
++</animated-vector>
+diff --git a/app/src/main/res/drawable/triforce_logo.xml b/app/src/main/res/drawable/triforce_logo.xml
+new file mode 100644
+index 0000000..c1753ae
+--- /dev/null
++++ b/app/src/main/res/drawable/triforce_logo.xml
+@@ -0,0 +1,27 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Triforce logo - three equilateral triangles forming a larger triangle -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="200dp"
++    android:height="174dp"
++    android:viewportWidth="200"
++    android:viewportHeight="174">
++
++    <!-- Top triangle -->
++    <path
++        android:name="top_triangle"
++        android:pathData="M100,0 L150,87 L50,87 Z"
++        android:fillColor="#FFB347"/>
++
++    <!-- Bottom left triangle -->
++    <path
++        android:name="bottom_left_triangle"
++        android:pathData="M50,87 L100,174 L0,174 Z"
++        android:fillColor="#FFB347"/>
++
++    <!-- Bottom right triangle -->
++    <path
++        android:name="bottom_right_triangle"
++        android:pathData="M150,87 L200,174 L100,174 Z"
++        android:fillColor="#FFB347"/>
++
++</vector>
+diff --git a/app/src/main/res/drawable/triforce_splash.xml b/app/src/main/res/drawable/triforce_splash.xml
+new file mode 100644
+index 0000000..582ee4a
+--- /dev/null
++++ b/app/src/main/res/drawable/triforce_splash.xml
+@@ -0,0 +1,27 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Triforce for splash screen - same design, optimized for 120dp -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="120dp"
++    android:height="104dp"
++    android:viewportWidth="200"
++    android:viewportHeight="174">
++
++    <!-- Top triangle -->
++    <path
++        android:name="top_triangle"
++        android:pathData="M100,0 L150,87 L50,87 Z"
++        android:fillColor="#FFB347"/>
++
++    <!-- Bottom left triangle -->
++    <path
++        android:name="bottom_left_triangle"
++        android:pathData="M50,87 L100,174 L0,174 Z"
++        android:fillColor="#FFB347"/>
++
++    <!-- Bottom right triangle -->
++    <path
++        android:name="bottom_right_triangle"
++        android:pathData="M150,87 L200,174 L100,174 Z"
++        android:fillColor="#FFB347"/>
++
++</vector>
+diff --git a/app/src/main/res/values/luxia_colors.xml b/app/src/main/res/values/luxia_colors.xml
+new file mode 100644
+index 0000000..fa267bd
+--- /dev/null
++++ b/app/src/main/res/values/luxia_colors.xml
+@@ -0,0 +1,20 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Luxia Temple Theme Colors -->
++<resources>
++    <!-- Primary colors -->
++    <color name="luxia_amber_gold">#FFB347</color>
++    <color name="luxia_void_black">#000000</color>
++    <color name="luxia_card_background">#1A1A1A</color>
++
++    <!-- Effects -->
++    <color name="luxia_spotlight">#66FFB347</color>
++    <color name="luxia_spotlight_pulse">#4DFFB347</color>
++
++    <!-- Text -->
++    <color name="luxia_text_primary">#FFFFFF</color>
++    <color name="luxia_text_secondary">#AAAAAA</color>
++
++    <!-- States -->
++    <color name="luxia_error">#E65100</color>
++    <color name="luxia_error_background">#1AE65100</color>
++</resources>
+diff --git a/app/src/main/res/values/luxia_strings.xml b/app/src/main/res/values/luxia_strings.xml
+new file mode 100644
+index 0000000..4c3a93e
+--- /dev/null
++++ b/app/src/main/res/values/luxia_strings.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Luxia Temple Theme Strings -->
++<resources>
++    <string name="luxia_theme_name">Luxia Temple 🜂</string>
++    <string name="luxia_theme_description">Amber &amp; void — with living flames</string>
++    <string name="luxia_settings_category">LUXIA THEME</string>
++    <string name="luxia_enable_theme">Enable Luxia Theme</string>
++    <string name="luxia_enable_flames">Enable Flame Overlay</string>
++    <string name="luxia_enable_flames_description">Rising embers on home screen</string>
++    <string name="luxia_enable_spotlight">Enable Spotlight</string>
++    <string name="luxia_enable_spotlight_description">Amber glow follows focus</string>
++</resources>
+diff --git a/app/src/main/res/values/luxia_styles.xml b/app/src/main/res/values/luxia_styles.xml
+new file mode 100644
+index 0000000..f478141
+--- /dev/null
++++ b/app/src/main/res/values/luxia_styles.xml
+@@ -0,0 +1,24 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Luxia Temple Theme Styles -->
++<resources>
++
++    <style name="LuxiaTheme" parent="Theme.Jellyfin">
++        <!-- Window background - void black -->
++        <item name="android:windowBackground">@color/luxia_void_black</item>
++        <item name="android:colorPrimary">@color/luxia_amber_gold</item>
++        <item name="android:colorPrimaryDark">@color/luxia_void_black</item>
++        <item name="android:colorAccent">@color/luxia_amber_gold</item>
++
++        <!-- Text colors -->
++        <item name="android:textColor">@color/luxia_text_primary</item>
++        <item name="android:textColorSecondary">@color/luxia_text_secondary</item>
++
++        <!-- Card styling -->
++        <item name="android:background">@color/luxia_card_background</item>
++    </style>
++
++    <style name="LuxiaTheme.Splash" parent="Theme.Jellyfin">
++        <item name="android:windowBackground">@color/luxia_void_black</item>
++    </style>
++
++</resources>
