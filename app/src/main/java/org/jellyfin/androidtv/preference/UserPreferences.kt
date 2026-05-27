@@ -254,6 +254,22 @@ class UserPreferences(context: Context) : SharedPreferenceStore(
 		 * Enable PGS subtitle direct-play.
 		 */
 		var pgsDirectPlay = booleanPreference("pgs_enabled", true)
+
+		/* Luxia Theme */
+		/**
+		 * Enable Luxia Temple theme
+		 */
+		var luxiaThemeEnabled = booleanPreference("luxia_theme_enabled", false)
+
+		/**
+		 * Enable flame overlay in Luxia theme
+		 */
+		var luxiaFlameOverlayEnabled = booleanPreference("luxia_flame_overlay_enabled", true)
+
+		/**
+		 * Enable spotlight overlay in Luxia theme
+		 */
+		var luxiaSpotlightEnabled = booleanPreference("luxia_spotlight_enabled", true)
 	}
 
 	init {
