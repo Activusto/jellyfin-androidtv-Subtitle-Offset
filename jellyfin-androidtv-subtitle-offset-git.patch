@@ -1,0 +1,1199 @@
+diff --git a/app/src/main/java/org/jellyfin/androidtv/ui/playback/PlaybackController.java b/app/src/main/java/org/jellyfin/androidtv/ui/playback/PlaybackController.java
+index d05a0a1..565d548 100644
+--- a/app/src/main/java/org/jellyfin/androidtv/ui/playback/PlaybackController.java
++++ b/app/src/main/java/org/jellyfin/androidtv/ui/playback/PlaybackController.java
+@@ -177,6 +177,22 @@ public class PlaybackController implements PlaybackControllerNotifiable {
+         }
+     }
+ 
++    public long getSubtitleTimingOffsetUs() {
++        return hasInitializedVideoManager() ? mVideoManager.getSubtitleTimingOffsetUs() : 0L;
++    }
++
++    public void adjustSubtitleTimingOffsetUs(long deltaUs) {
++        if (hasInitializedVideoManager()) {
++            mVideoManager.adjustSubtitleTimingOffsetUs(deltaUs);
++        }
++    }
++
++    public void resetSubtitleTimingOffset() {
++        if (hasInitializedVideoManager()) {
++            mVideoManager.resetSubtitleTimingOffset();
++        }
++    }
++
+     public void setPlaybackSpeed(float speed) {
+         mRequestedPlaybackSpeed = speed;
+         if (hasInitializedVideoManager()) {
+diff --git a/app/src/main/java/org/jellyfin/androidtv/ui/playback/VideoManager.java b/app/src/main/java/org/jellyfin/androidtv/ui/playback/VideoManager.java
+index 3be5cb2..8791eb3 100644
+--- a/app/src/main/java/org/jellyfin/androidtv/ui/playback/VideoManager.java
++++ b/app/src/main/java/org/jellyfin/androidtv/ui/playback/VideoManager.java
+@@ -41,6 +41,8 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
+ import androidx.media3.exoplayer.util.EventLogger;
+ import androidx.media3.extractor.DefaultExtractorsFactory;
+ import androidx.media3.extractor.ExtractorsFactory;
++import androidx.media3.extractor.text.DefaultSubtitleParserFactory;
++import androidx.media3.extractor.text.SubtitleParser;
+ import androidx.media3.extractor.ts.TsExtractor;
+ import androidx.media3.ui.AspectRatioFrameLayout;
+ import androidx.media3.ui.CaptionStyleCompat;
+@@ -51,6 +53,8 @@ import org.jellyfin.androidtv.data.compat.StreamInfo;
+ import org.jellyfin.androidtv.preference.UserPreferences;
+ import org.jellyfin.androidtv.preference.constant.BufferLength;
+ import org.jellyfin.androidtv.preference.constant.ZoomMode;
++import org.jellyfin.playback.media3.exoplayer.subtitle.SubtitleTimingOffsetRenderersFactory;
++import org.jellyfin.playback.media3.exoplayer.subtitle.SubtitleTimingOffsetState;
+ import org.jellyfin.sdk.api.client.ApiClient;
+ import org.jellyfin.sdk.model.api.MediaStream;
+ import org.jellyfin.sdk.model.api.MediaStreamType;
+@@ -83,6 +87,7 @@ public class VideoManager {
+     public ExoPlayer mExoPlayer;
+     private PlayerView mExoPlayerView;
+     private Handler mHandler = new Handler();
++    private final SubtitleTimingOffsetState subtitleTimingOffsetState = new SubtitleTimingOffsetState();
+ 
+     private long mMetaDuration = -1;
+     private long lastExoPlayerPosition = -1;
+@@ -218,7 +223,16 @@ public class VideoManager {
+      */
+     private ExoPlayer.Builder configureExoplayerBuilder(Context context, AssHandler assHandler) {
+         ExoPlayer.Builder exoPlayerBuilder = new ExoPlayer.Builder(context);
+-        DefaultRenderersFactory defaultRendererFactory = new DefaultRenderersFactory(context);
++
++        SubtitleParser.Factory legacySubtitleParserFactory = assHandler != null
++                ? new AssSubtitleParserFactory(assHandler)
++                : new DefaultSubtitleParserFactory();
++
++        SubtitleTimingOffsetRenderersFactory defaultRendererFactory = new SubtitleTimingOffsetRenderersFactory(
++                context,
++                subtitleTimingOffsetState,
++                legacySubtitleParserFactory
++        );
+         defaultRendererFactory.setEnableDecoderFallback(true);
+         defaultRendererFactory.setExtensionRendererMode(determineExoPlayerExtensionRendererMode());
+ 
+@@ -238,15 +252,18 @@ public class VideoManager {
+         extractorsFactory.setConstantBitrateSeekingAlwaysEnabled(true);
+         DefaultDataSource.Factory dataSourceFactory = new DefaultDataSource.Factory(context, exoPlayerHttpDataSourceFactory);
+         if (assHandler != null) {
+-            AssSubtitleParserFactory assSubtitleParserFactory = new AssSubtitleParserFactory(assHandler);
++            AssSubtitleParserFactory assSubtitleParserFactory = (AssSubtitleParserFactory) legacySubtitleParserFactory;
+             ExtractorsFactory assExtractorsFactory = AssPlayerKt.withAssMkvSupport(extractorsFactory, assSubtitleParserFactory, assHandler);
+             DefaultMediaSourceFactory mediaSourceFactory = new DefaultMediaSourceFactory(dataSourceFactory, assExtractorsFactory);
+-            mediaSourceFactory.setSubtitleParserFactory(assSubtitleParserFactory);
++            mediaSourceFactory.experimentalParseSubtitlesDuringExtraction(false);
++            mediaSourceFactory.setSubtitleParserFactory(legacySubtitleParserFactory);
+             exoPlayerBuilder.setMediaSourceFactory(mediaSourceFactory);
+             exoPlayerBuilder.setRenderersFactory(new AssRenderersFactory(assHandler, defaultRendererFactory));
+         } else {
+             exoPlayerBuilder.setRenderersFactory(defaultRendererFactory);
+-            exoPlayerBuilder.setMediaSourceFactory(new DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory));
++            exoPlayerBuilder.setMediaSourceFactory(new DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory)
++                    .experimentalParseSubtitlesDuringExtraction(false)
++                    .setSubtitleParserFactory(legacySubtitleParserFactory));
+         }
+ 
+         BufferLength bufferLength = userPreferences.get(UserPreferences.Companion.getBufferLength());
+@@ -600,6 +617,19 @@ public class VideoManager {
+         mExoPlayer.setPlaybackParameters(new PlaybackParameters(speed));
+     }
+ 
++    public long getSubtitleTimingOffsetUs() {
++        return subtitleTimingOffsetState.getOffsetUs();
++    }
++
++
++    public void adjustSubtitleTimingOffsetUs(long deltaUs) {
++        subtitleTimingOffsetState.adjustOffsetUs(deltaUs);
++    }
++
++    public void resetSubtitleTimingOffset() {
++        subtitleTimingOffsetState.setOffsetUs(0L);
++    }
++
+     public void destroy() {
+         mPlaybackControllerNotifiable = null;
+         stopPlayback();
+diff --git a/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/LeanbackOverlayFragment.java b/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/LeanbackOverlayFragment.java
+index 78c69c0..4a6af9b 100644
+--- a/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/LeanbackOverlayFragment.java
++++ b/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/LeanbackOverlayFragment.java
+@@ -24,6 +24,7 @@ public class LeanbackOverlayFragment extends PlaybackSupportFragment {
+     private CustomPlaybackTransportControlGlue playerGlue;
+     private VideoPlayerAdapter playerAdapter;
+     private boolean shouldShowOverlay = true;
++    private boolean subtitleOffsetMode = false;
+     private Lazy<PlaybackControllerContainer> playbackControllerContainer = inject(PlaybackControllerContainer.class);
+     private final Lazy<UserSettingPreferences> userSettingPreferences = inject(UserSettingPreferences.class);
+     private Lazy<ImageLoader> imageLoader = inject(ImageLoader.class);
+@@ -95,6 +96,27 @@ public class LeanbackOverlayFragment extends PlaybackSupportFragment {
+         playerAdapter.getMasterOverlayFragment().setFadingEnabled(fadingEnabled);
+     }
+ 
++    public void enterSubtitleOffsetMode() {
++        subtitleOffsetMode = true;
++        setShouldShowOverlay(false);
++        setBackgroundType(BG_NONE);
++        super.hideControlsOverlay(false);
++        playerAdapter.getMasterOverlayFragment().hide();
++        playerAdapter.getMasterOverlayFragment().setFadingEnabled(false);
++    }
++
++    public void exitSubtitleOffsetMode() {
++        subtitleOffsetMode = false;
++        setBackgroundType(BG_LIGHT);
++        setShouldShowOverlay(true);
++        playerAdapter.getMasterOverlayFragment().setFadingEnabled(true);
++        showControlsOverlay(false);
++    }
++
++    public boolean isSubtitleOffsetMode() {
++        return subtitleOffsetMode;
++    }
++
+     public void mediaInfoChanged() {
+         org.jellyfin.sdk.model.api.BaseItemDto currentlyPlayingItem = playbackControllerContainer.getValue().getPlaybackController().getCurrentlyPlayingItem();
+         if (currentlyPlayingItem == null) return;
+diff --git a/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/VideoPlayerAdapter.java b/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/VideoPlayerAdapter.java
+index 3b7d5a6..a25aeec 100644
+--- a/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/VideoPlayerAdapter.java
++++ b/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/VideoPlayerAdapter.java
+@@ -1,14 +1,19 @@
+ package org.jellyfin.androidtv.ui.playback.overlay;
+ 
+ import androidx.annotation.NonNull;
++import androidx.media3.common.MimeTypes;
+ import androidx.leanback.media.PlayerAdapter;
+ 
+ import org.jellyfin.androidtv.auth.repository.UserRepository;
+ import org.jellyfin.androidtv.ui.playback.CustomPlaybackOverlayFragment;
+ import org.jellyfin.androidtv.ui.playback.PlaybackController;
++import org.jellyfin.androidtv.ui.playback.VideoManagerHelperKt;
+ import org.jellyfin.androidtv.util.Utils;
+ import org.jellyfin.androidtv.util.apiclient.StreamHelper;
+ import org.jellyfin.sdk.model.api.ChapterInfo;
++import org.jellyfin.sdk.model.api.MediaStream;
++import org.jellyfin.sdk.model.api.MediaStreamType;
++import org.jellyfin.sdk.model.api.SubtitleDeliveryMethod;
+ import org.jellyfin.sdk.model.api.MediaSourceInfo;
+ import org.koin.java.KoinJavaComponent;
+ 
+@@ -104,6 +109,48 @@ public class VideoPlayerAdapter extends PlayerAdapter {
+         return StreamHelper.getSubtitleStreams(playbackController.getCurrentMediaSource()).size() > 0;
+     }
+ 
++    public boolean hasTimingAdjustableSubtitle() {
++        MediaSourceInfo mediaSource = playbackController.getCurrentMediaSource();
++        if (mediaSource == null || mediaSource.getMediaStreams() == null) return false;
++
++        int selectedSubtitleStreamIndex = playbackController.getSubtitleStreamIndex();
++        if (selectedSubtitleStreamIndex < 0) return false;
++
++        for (MediaStream stream : mediaSource.getMediaStreams()) {
++            if (stream.getIndex() != selectedSubtitleStreamIndex) {
++                continue;
++            }
++
++            if (stream.getType() != MediaStreamType.SUBTITLE) {
++                return false;
++            }
++
++            SubtitleDeliveryMethod deliveryMethod = stream.getDeliveryMethod();
++            if (deliveryMethod == SubtitleDeliveryMethod.ENCODE || deliveryMethod == SubtitleDeliveryMethod.DROP) {
++                return false;
++            }
++
++            // Allow offset for any text-based subtitle (not PGS/image)
++            String mimeType = VideoManagerHelperKt.getSubtitleMediaStreamCodec(stream);
++            if (mimeType == null) {
++                return false;
++            }
++
++            // Exclude known image-based formats
++            if (mimeType.toLowerCase().contains("pgs")
++                || mimeType.toLowerCase().contains("hdmv")
++                || mimeType.toLowerCase().contains("vobsub")
++                || mimeType.toLowerCase().contains("dvd")) {
++                return false;
++            }
++
++            // Allow all other formats (SRT, ASS, VTT, TTML, etc.)
++            return true;
++        }
++
++        return false;
++    }
++
+     public boolean hasMultiAudio() {
+         return StreamHelper.getAudioStreams(playbackController.getCurrentMediaSource()).size() > 1;
+     }
+diff --git a/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/action/ClosedCaptionsAction.kt b/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/action/ClosedCaptionsAction.kt
+index f55c3e9..d65dfc5 100644
+--- a/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/action/ClosedCaptionsAction.kt
++++ b/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/action/ClosedCaptionsAction.kt
+@@ -17,7 +17,12 @@ class ClosedCaptionsAction(
+ 	context: Context,
+ 	customPlaybackTransportControlGlue: CustomPlaybackTransportControlGlue,
+ ) : CustomAction(context, customPlaybackTransportControlGlue) {
++	companion object {
++		private const val ITEM_SET_OFFSET = Int.MIN_VALUE
++	}
++
+ 	private var popup: PopupMenu? = null
++	private val subtitleOffsetPopup = SubtitleOffsetPopup(context)
+ 
+ 	init {
+ 		initializeWithIcon(R.drawable.ic_select_subtitle)
+@@ -29,6 +34,8 @@ class ClosedCaptionsAction(
+ 		context: Context,
+ 		view: View,
+ 	) {
++		subtitleOffsetPopup.dismiss()
++
+ 		if (playbackController.currentStreamInfo == null) {
+ 			Timber.w("StreamInfo null trying to obtain subtitles")
+ 			Toast.makeText(context, "Unable to obtain subtitle info", Toast.LENGTH_LONG).show()
+@@ -37,9 +44,15 @@ class ClosedCaptionsAction(
+ 
+ 		videoPlayerAdapter.leanbackOverlayFragment.setFading(false)
+ 		removePopup()
++		var openingSubtitleOffsetPopup = false
+ 		popup = PopupMenu(context, view, Gravity.END).apply {
+ 			with(menu) {
+ 				var order = 0
++
++				if (videoPlayerAdapter.hasTimingAdjustableSubtitle()) {
++					add(1, ITEM_SET_OFFSET, order++, context.getString(R.string.lbl_subtitle_offset))
++				}
++
+ 				add(0, -1, order++, context.getString(R.string.lbl_none)).apply {
+ 					isChecked = playbackController.subtitleStreamIndex == -1
+ 				}
+@@ -55,12 +68,22 @@ class ClosedCaptionsAction(
+ 				setGroupCheckable(0, true, false)
+ 			}
+ 			setOnDismissListener {
+-				videoPlayerAdapter.leanbackOverlayFragment.setFading(true)
++				if (!openingSubtitleOffsetPopup) {
++					videoPlayerAdapter.leanbackOverlayFragment.setFading(true)
++				}
+ 				popup = null
+ 			}
+ 			setOnMenuItemClickListener { item ->
+-				playbackController.setSubtitleIndex(item.itemId)
+-				true
++				if (item.itemId == ITEM_SET_OFFSET) {
++					openingSubtitleOffsetPopup = true
++					view.post {
++						subtitleOffsetPopup.show(playbackController, videoPlayerAdapter)
++					}
++					false
++				} else {
++					playbackController.setSubtitleIndex(item.itemId)
++					true
++				}
+ 			}
+ 		}
+ 		popup?.show()
+@@ -68,5 +91,6 @@ class ClosedCaptionsAction(
+ 
+ 	fun removePopup() {
+ 		popup?.dismiss()
++		subtitleOffsetPopup.dismiss()
+ 	}
+ }
+diff --git a/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/action/SubtitleOffsetPopup.kt b/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/action/SubtitleOffsetPopup.kt
+new file mode 100644
+index 0000000..66df5a9
+--- /dev/null
++++ b/app/src/main/java/org/jellyfin/androidtv/ui/playback/overlay/action/SubtitleOffsetPopup.kt
+@@ -0,0 +1,224 @@
++package org.jellyfin.androidtv.ui.playback.overlay.action
++
++import android.app.Dialog
++import android.content.Context
++import android.graphics.Color
++import android.graphics.drawable.ColorDrawable
++import android.os.Handler
++import android.os.Looper
++import android.util.TypedValue
++import android.view.Gravity
++import android.view.KeyEvent
++import android.view.ViewGroup
++import android.view.Window
++import android.view.WindowManager
++import android.widget.Button
++import android.widget.LinearLayout
++import android.widget.TextView
++import org.jellyfin.androidtv.R
++import org.jellyfin.androidtv.ui.playback.PlaybackController
++import org.jellyfin.androidtv.ui.playback.overlay.VideoPlayerAdapter
++import java.util.Locale
++import kotlin.math.abs
++
++class SubtitleOffsetPopup(
++	private val context: Context,
++) {
++	companion object {
++		private const val OFFSET_US_100MS = 100_000L
++		private const val OFFSET_US_500MS = 500_000L
++		private const val KEY_REPEAT_INITIAL_DELAY_MS = 350L
++		private const val KEY_REPEAT_INTERVAL_MS = 80L
++	}
++
++	private val repeatHandler = Handler(Looper.getMainLooper())
++	private var repeatDeltaUs = 0L
++	private val repeatRunnable = object : Runnable {
++		override fun run() {
++			val activeDialog = dialog ?: return
++			if (!activeDialog.isShowing || repeatDeltaUs == 0L) return
++			repeatAction?.invoke(repeatDeltaUs)
++			repeatHandler.postDelayed(this, KEY_REPEAT_INTERVAL_MS)
++		}
++	}
++	private var repeatAction: ((Long) -> Unit)? = null
++
++	private var dialog: Dialog? = null
++	val isShowing: Boolean get() = dialog?.isShowing == true
++
++	fun show(
++		playbackController: PlaybackController,
++		videoPlayerAdapter: VideoPlayerAdapter,
++	) {
++		if (isShowing) return
++
++		videoPlayerAdapter.leanbackOverlayFragment.enterSubtitleOffsetMode()
++
++		val density = context.resources.displayMetrics.density
++		val panelPaddingHorizontal = (18 * density).toInt()
++		val panelPaddingVertical = (14 * density).toInt()
++		val rowSpacing = (10 * density).toInt()
++		val buttonSpacing = (8 * density).toInt()
++		val panelTopMargin = (32 * density).toInt()
++
++		val container = LinearLayout(context).apply {
++			orientation = LinearLayout.VERTICAL
++			background = context.getDrawable(R.drawable.subtitle_offset_panel)
++			setPadding(panelPaddingHorizontal, panelPaddingVertical, panelPaddingHorizontal, panelPaddingVertical)
++		}
++
++		val currentOffsetText = TextView(context).apply {
++			setTextColor(Color.WHITE)
++			setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
++			text = context.getString(
++				R.string.lbl_subtitle_offset_current,
++				formatOffset(playbackController.subtitleTimingOffsetUs),
++			)
++		}
++		fun updateOffsetText() {
++			currentOffsetText.text = context.getString(
++				R.string.lbl_subtitle_offset_current,
++				formatOffset(playbackController.subtitleTimingOffsetUs),
++			)
++		}
++		fun applyOffsetDelta(offsetUs: Long) {
++			playbackController.adjustSubtitleTimingOffsetUs(offsetUs)
++			updateOffsetText()
++		}
++		fun resetOffset() {
++			playbackController.resetSubtitleTimingOffset()
++			updateOffsetText()
++		}
++		container.addView(
++			currentOffsetText,
++			LinearLayout.LayoutParams(
++				ViewGroup.LayoutParams.WRAP_CONTENT,
++				ViewGroup.LayoutParams.WRAP_CONTENT,
++			),
++		)
++
++		val adjustmentRow = LinearLayout(context).apply {
++			orientation = LinearLayout.HORIZONTAL
++			gravity = Gravity.CENTER_HORIZONTAL
++		}
++
++		fun createButton(label: String, onClick: () -> Unit): Button = Button(context).apply {
++			text = label
++			isAllCaps = false
++			background = context.getDrawable(R.drawable.subtitle_offset_button)
++			setTextColor(Color.WHITE)
++			stateListAnimator = null
++			minimumWidth = 0
++			minWidth = 0
++			minHeight = 0
++			minimumHeight = 0
++			setPadding((14 * density).toInt(), (8 * density).toInt(), (14 * density).toInt(), (8 * density).toInt())
++			setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
++			setOnClickListener {
++				onClick()
++				updateOffsetText()
++			}
++		}
++
++		val adjustmentButtons = listOf(
++			createButton("-0.5s") { applyOffsetDelta(-OFFSET_US_500MS) },
++			createButton("-0.1s") { applyOffsetDelta(-OFFSET_US_100MS) },
++			createButton("+0.1s") { applyOffsetDelta(OFFSET_US_100MS) },
++			createButton("+0.5s") { applyOffsetDelta(OFFSET_US_500MS) },
++			createButton(context.getString(R.string.lbl_reset)) { resetOffset() },
++		)
++		adjustmentButtons.forEachIndexed { index, button ->
++			adjustmentRow.addView(
++				button,
++				LinearLayout.LayoutParams(
++					ViewGroup.LayoutParams.WRAP_CONTENT,
++					ViewGroup.LayoutParams.WRAP_CONTENT,
++				).apply {
++					if (index > 0) marginStart = buttonSpacing
++				},
++			)
++		}
++		container.addView(
++			adjustmentRow,
++			LinearLayout.LayoutParams(
++				ViewGroup.LayoutParams.WRAP_CONTENT,
++				ViewGroup.LayoutParams.WRAP_CONTENT,
++			).apply {
++				this.topMargin = rowSpacing
++				gravity = Gravity.CENTER_HORIZONTAL
++			},
++		)
++
++		repeatAction = { deltaUs -> applyOffsetDelta(deltaUs) }
++
++		dialog = Dialog(context, R.style.Theme_Jellyfin_Dialog).apply {
++			requestWindowFeature(Window.FEATURE_NO_TITLE)
++			setContentView(container)
++			setCanceledOnTouchOutside(false)
++			window?.apply {
++				setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
++				clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
++				setDimAmount(0f)
++				attributes = attributes.apply {
++					width = WindowManager.LayoutParams.WRAP_CONTENT
++					height = WindowManager.LayoutParams.WRAP_CONTENT
++					gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
++					y = panelTopMargin
++				}
++			}
++			setOnKeyListener { _, keyCode, event ->
++				when (keyCode) {
++					KeyEvent.KEYCODE_DPAD_UP -> handleRepeatKey(event, OFFSET_US_100MS)
++					KeyEvent.KEYCODE_DPAD_DOWN -> handleRepeatKey(event, -OFFSET_US_100MS)
++					else -> false
++				}
++			}
++			setOnDismissListener {
++				stopRepeatingAdjustments()
++				repeatAction = null
++				videoPlayerAdapter.leanbackOverlayFragment.exitSubtitleOffsetMode()
++				dialog = null
++			}
++			show()
++			adjustmentButtons.firstOrNull()?.requestFocus()
++		}
++	}
++
++	fun dismiss() {
++		dialog?.dismiss()
++	}
++
++	private fun handleRepeatKey(event: KeyEvent, deltaUs: Long): Boolean {
++		return when (event.action) {
++			KeyEvent.ACTION_DOWN -> {
++				if (event.repeatCount == 0) {
++					repeatAction?.invoke(deltaUs)
++					startRepeatingAdjustments(deltaUs)
++				}
++				true
++			}
++			KeyEvent.ACTION_UP -> {
++				stopRepeatingAdjustments()
++				true
++			}
++			else -> false
++		}
++	}
++
++	private fun startRepeatingAdjustments(deltaUs: Long) {
++		repeatDeltaUs = deltaUs
++		repeatHandler.removeCallbacks(repeatRunnable)
++		repeatHandler.postDelayed(repeatRunnable, KEY_REPEAT_INITIAL_DELAY_MS)
++	}
++
++	private fun stopRepeatingAdjustments() {
++		repeatDeltaUs = 0L
++		repeatHandler.removeCallbacks(repeatRunnable)
++	}
++
++	private fun formatOffset(offsetUs: Long): String {
++		val seconds = offsetUs / 1_000_000.0
++		val safeSeconds = if (abs(seconds) < 0.05) 0.0 else seconds
++		return String.format(Locale.US, "%+.1fs", safeSeconds)
++	}
++}
+diff --git a/app/src/main/java/org/jellyfin/androidtv/ui/player/video/VideoPlayerControls.kt b/app/src/main/java/org/jellyfin/androidtv/ui/player/video/VideoPlayerControls.kt
+index 57e0162..f171235 100644
+--- a/app/src/main/java/org/jellyfin/androidtv/ui/player/video/VideoPlayerControls.kt
++++ b/app/src/main/java/org/jellyfin/androidtv/ui/player/video/VideoPlayerControls.kt
+@@ -30,6 +30,7 @@ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.res.vectorResource
+ import androidx.compose.ui.unit.DpOffset
+ import androidx.compose.ui.unit.dp
++import org.jellyfin.androidtv.ui.base.button.Button
+ import kotlinx.coroutines.launch
+ import org.jellyfin.androidtv.R
+ import org.jellyfin.androidtv.ui.base.Icon
+@@ -44,6 +45,7 @@ import org.jellyfin.playback.core.model.PlayState
+ import org.jellyfin.playback.core.queue.queue
+ import org.koin.compose.koinInject
+ import kotlin.time.Duration
++import kotlin.time.Duration.Companion.milliseconds
+ import kotlin.time.Duration.Companion.seconds
+ import kotlin.time.DurationUnit
+ 
+@@ -72,8 +74,16 @@ fun VideoPlayerControls(
+ 			PlaybackInfoButton(onClick = onPlaybackInfoClick)
+ 
+ 			MoreOptionsButton {
+-				PreviousEntryButton(playbackManager)
+-				NextEntryButton(playbackManager)
++				Column(
++					verticalArrangement = Arrangement.spacedBy(8.dp),
++				) {
++					Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
++						PreviousEntryButton(playbackManager)
++						NextEntryButton(playbackManager)
++					}
++
++					SubtitleOffsetControls(playbackManager)
++				}
+ 			}
+ 		}
+ 
+@@ -241,6 +251,49 @@ private fun PositionText(
+ 	)
+ }
+ 
++private fun formatSubtitleOffset(offset: Duration): String {
++	val seconds = offset.inWholeMilliseconds / 1000.0
++	val safeSeconds = if (kotlin.math.abs(seconds) < 0.05) 0.0 else seconds
++	return String.format(java.util.Locale.US, "%+.1fs", safeSeconds)
++}
++
++@Composable
++private fun SubtitleOffsetControls(
++	playbackManager: PlaybackManager,
++) {
++	val subtitleTimingOffset by playbackManager.state.subtitleTimingOffset.collectAsState()
++	val subtitleTimingOffsetSupported by playbackManager.state.subtitleTimingOffsetSupported.collectAsState()
++	if (!subtitleTimingOffsetSupported) return
++
++	Column(
++		verticalArrangement = Arrangement.spacedBy(8.dp),
++		modifier = Modifier.padding(horizontal = 4.dp),
++	) {
++		Text(
++			text = stringResource(R.string.lbl_subtitle_offset_current, formatSubtitleOffset(subtitleTimingOffset)),
++			style = LocalTextStyle.current.copy(color = Color.White),
++		)
++
++		Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
++			Button(onClick = { playbackManager.state.adjustSubtitleTimingOffset((-500).milliseconds) }) {
++				Text("-0.5s")
++			}
++			Button(onClick = { playbackManager.state.adjustSubtitleTimingOffset((-100).milliseconds) }) {
++				Text("-0.1s")
++			}
++			Button(onClick = { playbackManager.state.adjustSubtitleTimingOffset(100.milliseconds) }) {
++				Text("+0.1s")
++			}
++			Button(onClick = { playbackManager.state.adjustSubtitleTimingOffset(500.milliseconds) }) {
++				Text("+0.5s")
++			}
++			Button(onClick = { playbackManager.state.resetSubtitleTimingOffset() }) {
++				Text(stringResource(R.string.lbl_reset))
++			}
++		}
++	}
++}
++
+ @Composable
+ private fun MoreOptionsButton(
+ 	content: @Composable () -> Unit,
+diff --git a/app/src/main/java/org/jellyfin/androidtv/ui/settings/screen/SettingsDeveloperScreen.kt b/app/src/main/java/org/jellyfin/androidtv/ui/settings/screen/SettingsDeveloperScreen.kt
+index bb2af8f..ec6ff11 100644
+--- a/app/src/main/java/org/jellyfin/androidtv/ui/settings/screen/SettingsDeveloperScreen.kt
++++ b/app/src/main/java/org/jellyfin/androidtv/ui/settings/screen/SettingsDeveloperScreen.kt
+@@ -70,7 +70,10 @@ fun SettingsDeveloperScreen() {
+ 				captionContent = { Text(stringResource(R.string.enable_playback_module_description)) },
+ 				onClick = { playbackRewriteVideoEnabled = !playbackRewriteVideoEnabled }
+ 			)
++		}
+ 
++		// libass setting - always available for ASS subtitle direct play
++		item {
+ 			var assDirectPlay by rememberPreference(userPreferences, UserPreferences.assDirectPlay)
+ 			ListButton(
+ 				headingContent = { Text(stringResource(R.string.preference_enable_libass)) },
+diff --git a/app/src/main/res/drawable/subtitle_offset_button.xml b/app/src/main/res/drawable/subtitle_offset_button.xml
+new file mode 100644
+index 0000000..2f6344d
+--- /dev/null
++++ b/app/src/main/res/drawable/subtitle_offset_button.xml
+@@ -0,0 +1,30 @@
++<?xml version="1.0" encoding="utf-8"?>
++<selector xmlns:android="http://schemas.android.com/apk/res/android">
++    <item android:state_enabled="true" android:state_focused="true">
++        <shape android:shape="rectangle">
++            <corners android:radius="10dp" />
++            <solid android:color="#CC00A4DC" />
++            <stroke
++                android:width="1dp"
++                android:color="#B3FFFFFF" />
++        </shape>
++    </item>
++    <item android:state_enabled="true" android:state_pressed="true">
++        <shape android:shape="rectangle">
++            <corners android:radius="10dp" />
++            <solid android:color="#CC00A4DC" />
++            <stroke
++                android:width="1dp"
++                android:color="#B3FFFFFF" />
++        </shape>
++    </item>
++    <item>
++        <shape android:shape="rectangle">
++            <corners android:radius="10dp" />
++            <solid android:color="#66000000" />
++            <stroke
++                android:width="1dp"
++                android:color="#66FFFFFF" />
++        </shape>
++    </item>
++</selector>
+diff --git a/app/src/main/res/drawable/subtitle_offset_panel.xml b/app/src/main/res/drawable/subtitle_offset_panel.xml
+new file mode 100644
+index 0000000..51105f7
+--- /dev/null
++++ b/app/src/main/res/drawable/subtitle_offset_panel.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android"
++    android:shape="rectangle">
++    <corners android:radius="18dp" />
++    <solid android:color="#96101010" />
++    <stroke
++        android:width="1dp"
++        android:color="#40FFFFFF" />
++</shape>
+diff --git a/app/src/main/res/values-en-rGB/strings.xml b/app/src/main/res/values-en-rGB/strings.xml
+index ac4bbc4..8e2e409 100644
+--- a/app/src/main/res/values-en-rGB/strings.xml
++++ b/app/src/main/res/values-en-rGB/strings.xml
+@@ -646,4 +646,7 @@
+     <string name="playback_buffer_auto">Auto</string>
+     <string name="playback_buffer_large">Large</string>
+     <string name="playback_buffer_extra_large">Extra large</string>
++    <string name="lbl_subtitle_offset">Subtitle offset</string>
++    <string name="lbl_subtitle_offset_current">Subtitle offset %1$s</string>
++    <string name="lbl_reset">Reset</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index cbc959f..cfbc20e 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -660,4 +660,7 @@
+     <string name="sdr">SDR</string>
+     <string name="hdr10">HDR10</string>
+     <string name="hlg">HLG</string>
++    <string name="lbl_subtitle_offset">Subtitle offset</string>
++    <string name="lbl_subtitle_offset_current">Subtitle offset %1$s</string>
++    <string name="lbl_reset">Reset</string>
+ </resources>
+diff --git a/playback/core/src/main/kotlin/PlayerState.kt b/playback/core/src/main/kotlin/PlayerState.kt
+index bd35346..b8de7fe 100644
+--- a/playback/core/src/main/kotlin/PlayerState.kt
++++ b/playback/core/src/main/kotlin/PlayerState.kt
+@@ -22,6 +22,8 @@ interface PlayerState {
+ 	val playbackOrder: StateFlow<PlaybackOrder>
+ 	val repeatMode: StateFlow<RepeatMode>
+ 	val scrubbing: StateFlow<Boolean>
++	val subtitleTimingOffset: StateFlow<Duration>
++	val subtitleTimingOffsetSupported: StateFlow<Boolean>
+ 
+ 	/**
+ 	 * The position information for the currently playing item or [PositionInfo.EMPTY]. This
+@@ -49,6 +51,9 @@ interface PlayerState {
+ 	// Playback properties
+ 
+ 	fun setSpeed(speed: Float)
++	fun setSubtitleTimingOffset(offset: Duration)
++	fun adjustSubtitleTimingOffset(amount: Duration)
++	fun resetSubtitleTimingOffset()
+ 
+ 	fun setPlaybackOrder(order: PlaybackOrder)
+ 
+@@ -80,6 +85,12 @@ class MutablePlayerState(
+ 	private val _scrubbing = MutableStateFlow(false)
+ 	override val scrubbing: StateFlow<Boolean> get() = _scrubbing.asStateFlow()
+ 
++	private val _subtitleTimingOffset = MutableStateFlow(Duration.ZERO)
++	override val subtitleTimingOffset: StateFlow<Duration> get() = _subtitleTimingOffset.asStateFlow()
++
++	private val _subtitleTimingOffsetSupported = MutableStateFlow(false)
++	override val subtitleTimingOffsetSupported: StateFlow<Boolean> get() = _subtitleTimingOffsetSupported.asStateFlow()
++
+ 	override val positionInfo: PositionInfo
+ 		get() = backendService.backend?.getPositionInfo() ?: PositionInfo.EMPTY
+ 
+@@ -100,6 +111,14 @@ class MutablePlayerState(
+ 					backendService.backend?.play()
+ 				}
+ 			}
++
++			override fun onSubtitleTimingOffsetSupportChange(supported: Boolean) {
++				_subtitleTimingOffsetSupported.value = supported
++				if (!supported && _subtitleTimingOffset.value != Duration.ZERO) {
++					_subtitleTimingOffset.value = Duration.ZERO
++					backendService.backend?.setSubtitleTimingOffset(Duration.ZERO)
++				}
++			}
+ 		})
+ 
+ 		volume = options.playerVolumeState
+@@ -150,6 +169,19 @@ class MutablePlayerState(
+ 		backendService.backend?.setSpeed(speed)
+ 	}
+ 
++	override fun setSubtitleTimingOffset(offset: Duration) {
++		_subtitleTimingOffset.value = offset
++		backendService.backend?.setSubtitleTimingOffset(offset)
++	}
++
++	override fun adjustSubtitleTimingOffset(amount: Duration) {
++		setSubtitleTimingOffset(_subtitleTimingOffset.value + amount)
++	}
++
++	override fun resetSubtitleTimingOffset() {
++		setSubtitleTimingOffset(Duration.ZERO)
++	}
++
+ 	override fun setPlaybackOrder(order: PlaybackOrder) {
+ 		_playbackOrder.value = order
+ 	}
+diff --git a/playback/core/src/main/kotlin/backend/BackendService.kt b/playback/core/src/main/kotlin/backend/BackendService.kt
+index 84e84ba..4ad0dcd 100644
+--- a/playback/core/src/main/kotlin/backend/BackendService.kt
++++ b/playback/core/src/main/kotlin/backend/BackendService.kt
+@@ -94,5 +94,9 @@ class BackendService {
+ 		override fun onMediaStreamEnd(mediaStream: PlayableMediaStream) {
+ 			callListeners { onMediaStreamEnd(mediaStream) }
+ 		}
++
++		override fun onSubtitleTimingOffsetSupportChange(supported: Boolean) {
++			callListeners { onSubtitleTimingOffsetSupportChange(supported) }
++		}
+ 	}
+ }
+diff --git a/playback/core/src/main/kotlin/backend/PlayerBackend.kt b/playback/core/src/main/kotlin/backend/PlayerBackend.kt
+index 184d81e..604b099 100644
+--- a/playback/core/src/main/kotlin/backend/PlayerBackend.kt
++++ b/playback/core/src/main/kotlin/backend/PlayerBackend.kt
+@@ -40,6 +40,8 @@ interface PlayerBackend {
+ 
+ 	fun setSpeed(speed: Float)
+ 
++	fun setSubtitleTimingOffset(offset: Duration)
++
+ 	fun setTimedEvents(timedEvents: List<TimedEvent>)
+ }
+ 
+diff --git a/playback/core/src/main/kotlin/backend/PlayerBackendEventListener.kt b/playback/core/src/main/kotlin/backend/PlayerBackendEventListener.kt
+index ecd871a..210c37d 100644
+--- a/playback/core/src/main/kotlin/backend/PlayerBackendEventListener.kt
++++ b/playback/core/src/main/kotlin/backend/PlayerBackendEventListener.kt
+@@ -7,4 +7,5 @@ abstract class PlayerBackendEventListener {
+ 	open fun onPlayStateChange(state: PlayState) = Unit
+ 	open fun onVideoSizeChange(width: Int, height: Int) = Unit
+ 	open fun onMediaStreamEnd(mediaStream: PlayableMediaStream) = Unit
++	open fun onSubtitleTimingOffsetSupportChange(supported: Boolean) = Unit
+ }
+diff --git a/playback/media3/exoplayer/src/main/kotlin/ExoPlayerBackend.kt b/playback/media3/exoplayer/src/main/kotlin/ExoPlayerBackend.kt
+index 1f84095..45e6d94 100644
+--- a/playback/media3/exoplayer/src/main/kotlin/ExoPlayerBackend.kt
++++ b/playback/media3/exoplayer/src/main/kotlin/ExoPlayerBackend.kt
+@@ -11,6 +11,7 @@ import androidx.media3.common.PlaybackException
+ import androidx.media3.common.Player
+ import androidx.media3.common.Timeline
+ import androidx.media3.common.TrackSelectionParameters
++import androidx.media3.common.Tracks
+ import androidx.media3.common.VideoSize
+ import androidx.media3.common.text.CueGroup
+ import androidx.media3.common.util.UnstableApi
+@@ -23,6 +24,8 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+ import androidx.media3.exoplayer.util.EventLogger
+ import androidx.media3.extractor.DefaultExtractorsFactory
+ import androidx.media3.extractor.ts.TsExtractor
++import androidx.media3.extractor.text.DefaultSubtitleParserFactory
++import androidx.media3.extractor.text.SubtitleParser
+ import androidx.media3.ui.SubtitleView
+ import io.github.peerless2012.ass.media.AssHandler
+ import io.github.peerless2012.ass.media.factory.AssRenderersFactory
+@@ -44,6 +47,9 @@ import org.jellyfin.playback.core.support.PlaySupportReport
+ import org.jellyfin.playback.core.timedevent.TimedEvent
+ import org.jellyfin.playback.core.ui.PlayerSubtitleView
+ import org.jellyfin.playback.core.ui.PlayerSurfaceView
++import org.jellyfin.playback.media3.exoplayer.subtitle.SubtitleTimingOffsetRenderersFactory
++import org.jellyfin.playback.media3.exoplayer.subtitle.SubtitleTimingOffsetState
++import org.jellyfin.playback.media3.exoplayer.subtitle.isSubtitleTimingOffsetSupported
+ import org.jellyfin.playback.media3.exoplayer.support.getPlaySupportReport
+ import org.jellyfin.playback.media3.exoplayer.support.toFormats
+ import timber.log.Timber
+@@ -67,6 +73,7 @@ class ExoPlayerBackend(
+ 	private val audioAttributeState = AudioAttributeState()
+ 	private val timedEventState = TimedEventState()
+ 	private var lastKnownDuration: Duration? = null
++	private val subtitleTimingOffsetState = SubtitleTimingOffsetState()
+ 
+ 	private val assHandler by lazy {
+ 		AssHandler(AssRenderType.OVERLAY_OPEN_GL)
+@@ -89,15 +96,31 @@ class ExoPlayerBackend(
+ 			setConstantBitrateSeekingAlwaysEnabled(true)
+ 		}
+ 
++		val legacySubtitleParserFactory: SubtitleParser.Factory = if (exoPlayerOptions.enableLibass) {
++			AssSubtitleParserFactory(assHandler)
++		} else {
++			DefaultSubtitleParserFactory()
++		}
++
+ 		val mediaSourceFactory = if (exoPlayerOptions.enableLibass) {
+-			val assSubtitleParserFactory = AssSubtitleParserFactory(assHandler)
++			val assSubtitleParserFactory = legacySubtitleParserFactory as AssSubtitleParserFactory
+ 			val assExtractorsFactory = extractorsFactory.withAssMkvSupport(assSubtitleParserFactory, assHandler)
+ 			DefaultMediaSourceFactory(dataSourceFactory, assExtractorsFactory).apply {
+-				setSubtitleParserFactory(assSubtitleParserFactory)
++				@Suppress("DEPRECATION")
++				experimentalParseSubtitlesDuringExtraction(false)
++				setSubtitleParserFactory(legacySubtitleParserFactory)
+ 			}
+-		} else DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory)
++		} else DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory).apply {
++			@Suppress("DEPRECATION")
++			experimentalParseSubtitlesDuringExtraction(false)
++			setSubtitleParserFactory(legacySubtitleParserFactory)
++		}
+ 
+-		val renderersFactory = DefaultRenderersFactory(context).apply {
++		val renderersFactory = SubtitleTimingOffsetRenderersFactory(
++			context = context,
++			offsetState = subtitleTimingOffsetState,
++			subtitleParserFactory = legacySubtitleParserFactory,
++		).apply {
+ 			setEnableDecoderFallback(true)
+ 			setExtensionRendererMode(
+ 				when (exoPlayerOptions.preferFfmpeg) {
+@@ -176,6 +199,16 @@ class ExoPlayerBackend(
+ 			onIsPlayingChanged(exoPlayer.isPlaying)
+ 		}
+ 
++		override fun onTracksChanged(tracks: Tracks) {
++			val canAdjustSubtitleTiming = tracks.groups
++				.asSequence()
++				.filter { it.type == C.TRACK_TYPE_TEXT }
++				.flatMap { group -> (0 until group.length).asSequence().filter(group::isTrackSelected).map(group::getTrackFormat) }
++				.any(::isSubtitleTimingOffsetSupported)
++
++			listener?.onSubtitleTimingOffsetSupportChange(canAdjustSubtitleTiming)
++		}
++
+ 		override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+ 			if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) {
+ 				listener?.onMediaStreamEnd(requireNotNull(currentStream))
+@@ -336,4 +369,9 @@ class ExoPlayerBackend(
+ 	override fun setTimedEvents(timedEvents: List<TimedEvent>) {
+ 		timedEventState.setTimedEvents(exoPlayer, timedEvents)
+ 	}
++
++
++	override fun setSubtitleTimingOffset(offset: Duration) {
++		subtitleTimingOffsetState.setOffsetUs(offset.inWholeMicroseconds)
++	}
+ }
+diff --git a/playback/media3/exoplayer/src/main/kotlin/subtitle/OffsetSubtitleDecoder.kt b/playback/media3/exoplayer/src/main/kotlin/subtitle/OffsetSubtitleDecoder.kt
+new file mode 100644
+index 0000000..956b22f
+--- /dev/null
++++ b/playback/media3/exoplayer/src/main/kotlin/subtitle/OffsetSubtitleDecoder.kt
+@@ -0,0 +1,41 @@
++package org.jellyfin.playback.media3.exoplayer.subtitle
++
++import androidx.media3.common.util.UnstableApi
++import androidx.media3.extractor.text.SubtitleDecoder
++import androidx.media3.extractor.text.SubtitleDecoderException
++import androidx.media3.extractor.text.SubtitleInputBuffer
++import androidx.media3.extractor.text.SubtitleOutputBuffer
++
++@UnstableApi
++internal class OffsetSubtitleDecoder(
++	private val delegate: SubtitleDecoder,
++	private val offsetState: SubtitleTimingOffsetState,
++) : SubtitleDecoder {
++	override fun getName(): String = delegate.name
++
++	override fun setOutputStartTimeUs(outputStartTimeUs: Long) {
++		delegate.setOutputStartTimeUs(outputStartTimeUs)
++	}
++
++	override fun dequeueInputBuffer(): SubtitleInputBuffer? = delegate.dequeueInputBuffer()
++
++	override fun queueInputBuffer(inputBuffer: SubtitleInputBuffer) {
++		delegate.queueInputBuffer(inputBuffer)
++	}
++
++	override fun dequeueOutputBuffer(): SubtitleOutputBuffer? = delegate.dequeueOutputBuffer()?.let { buffer ->
++		OffsetSubtitleOutputBuffer(buffer, offsetState)
++	}
++
++	override fun flush() {
++		delegate.flush()
++	}
++
++	override fun release() {
++		delegate.release()
++	}
++
++	override fun setPositionUs(positionUs: Long) {
++		delegate.setPositionUs(positionUs)
++	}
++}
+diff --git a/playback/media3/exoplayer/src/main/kotlin/subtitle/OffsetSubtitleOutputBuffer.kt b/playback/media3/exoplayer/src/main/kotlin/subtitle/OffsetSubtitleOutputBuffer.kt
+new file mode 100644
+index 0000000..f1f07a6
+--- /dev/null
++++ b/playback/media3/exoplayer/src/main/kotlin/subtitle/OffsetSubtitleOutputBuffer.kt
+@@ -0,0 +1,38 @@
++package org.jellyfin.playback.media3.exoplayer.subtitle
++
++import androidx.media3.common.C
++import androidx.media3.common.util.UnstableApi
++import androidx.media3.extractor.text.SubtitleOutputBuffer
++
++@UnstableApi
++internal class OffsetSubtitleOutputBuffer(
++	private val delegate: SubtitleOutputBuffer,
++	private val offsetState: SubtitleTimingOffsetState,
++) : SubtitleOutputBuffer(), SubtitleTimingOffsetState.Listener {
++	init {
++		skippedOutputBufferCount = delegate.skippedOutputBufferCount
++		shouldBeSkipped = delegate.shouldBeSkipped
++		if (delegate.isEndOfStream) addFlag(C.BUFFER_FLAG_END_OF_STREAM)
++		if (delegate.isFirstSample) addFlag(C.BUFFER_FLAG_FIRST_SAMPLE)
++		if (delegate.isKeyFrame) addFlag(C.BUFFER_FLAG_KEY_FRAME)
++		if (delegate.isLastSample) addFlag(C.BUFFER_FLAG_LAST_SAMPLE)
++		if (delegate.hasSupplementalData()) addFlag(C.BUFFER_FLAG_HAS_SUPPLEMENTAL_DATA)
++		if (delegate.notDependedOn()) addFlag(C.BUFFER_FLAG_NOT_DEPENDED_ON)
++		offsetState.addListener(this)
++	}
++
++	override fun onSubtitleTimingOffsetChanged(offsetUs: Long) {
++		if (!delegate.isEndOfStream) {
++			updateContent(offsetUs)
++		}
++	}
++
++	private fun updateContent(offsetUs: Long) {
++		setContent(delegate.timeUs + offsetUs, delegate, offsetUs)
++	}
++
++	override fun release() {
++		offsetState.removeListener(this)
++		delegate.release()
++	}
++}
+diff --git a/playback/media3/exoplayer/src/main/kotlin/subtitle/ParserBackedSubtitleDecoder.kt b/playback/media3/exoplayer/src/main/kotlin/subtitle/ParserBackedSubtitleDecoder.kt
+new file mode 100644
+index 0000000..966a10d
+--- /dev/null
++++ b/playback/media3/exoplayer/src/main/kotlin/subtitle/ParserBackedSubtitleDecoder.kt
+@@ -0,0 +1,17 @@
++package org.jellyfin.playback.media3.exoplayer.subtitle
++
++import androidx.media3.common.util.UnstableApi
++import androidx.media3.extractor.text.SimpleSubtitleDecoder
++import androidx.media3.extractor.text.Subtitle
++import androidx.media3.extractor.text.SubtitleParser
++
++@UnstableApi
++internal class ParserBackedSubtitleDecoder(
++	name: String,
++	private val subtitleParser: SubtitleParser,
++) : SimpleSubtitleDecoder(name) {
++	override fun decode(data: ByteArray, length: Int, reset: Boolean): Subtitle {
++		if (reset) subtitleParser.reset()
++		return subtitleParser.parseToLegacySubtitle(data, 0, length)
++	}
++}
+diff --git a/playback/media3/exoplayer/src/main/kotlin/subtitle/SubtitleTimingOffsetDecoderFactory.kt b/playback/media3/exoplayer/src/main/kotlin/subtitle/SubtitleTimingOffsetDecoderFactory.kt
+new file mode 100644
+index 0000000..20bd0c5
+--- /dev/null
++++ b/playback/media3/exoplayer/src/main/kotlin/subtitle/SubtitleTimingOffsetDecoderFactory.kt
+@@ -0,0 +1,52 @@
++package org.jellyfin.playback.media3.exoplayer.subtitle
++
++import androidx.media3.common.Format
++import androidx.media3.common.MimeTypes
++import androidx.media3.common.util.UnstableApi
++import androidx.media3.exoplayer.text.SubtitleDecoderFactory
++import androidx.media3.extractor.text.SubtitleDecoder
++import androidx.media3.extractor.text.SubtitleParser
++import androidx.media3.extractor.text.cea.Cea608Decoder
++import androidx.media3.extractor.text.cea.Cea708Decoder
++
++@UnstableApi
++class SubtitleTimingOffsetDecoderFactory(
++	private val subtitleParserFactory: SubtitleParser.Factory,
++	private val offsetState: SubtitleTimingOffsetState,
++) : SubtitleDecoderFactory {
++	private val defaultDecoderFactory = SubtitleDecoderFactory.DEFAULT
++	override fun supportsFormat(format: Format): Boolean =
++		defaultDecoderFactory.supportsFormat(format) || when (format.sampleMimeType) {
++			MimeTypes.APPLICATION_CEA608,
++			MimeTypes.APPLICATION_MP4CEA608,
++			MimeTypes.APPLICATION_CEA708 -> true
++			else -> subtitleParserFactory.supportsFormat(format)
++		}
++
++	override fun createDecoder(format: Format): SubtitleDecoder {
++		val mimeType = format.sampleMimeType
++		val delegate = when {
++			defaultDecoderFactory.supportsFormat(format) -> defaultDecoderFactory.createDecoder(format)
++
++			mimeType == MimeTypes.APPLICATION_CEA608 || mimeType == MimeTypes.APPLICATION_MP4CEA608 -> Cea608Decoder(
++				mimeType,
++				format.accessibilityChannel,
++				Cea608Decoder.MIN_DATA_CHANNEL_TIMEOUT_MS,
++			)
++
++			mimeType == MimeTypes.APPLICATION_CEA708 -> Cea708Decoder(format.accessibilityChannel, format.initializationData)
++
++			subtitleParserFactory.supportsFormat(format) -> {
++				val parser = subtitleParserFactory.create(format)
++				ParserBackedSubtitleDecoder("${parser.javaClass.simpleName}Decoder", parser)
++			}
++
++			else -> throw IllegalArgumentException("Attempted to create decoder for unsupported MIME type: $mimeType")
++		}
++
++		return when {
++			isSubtitleTimingOffsetSupported(format) -> OffsetSubtitleDecoder(delegate, offsetState)
++			else -> delegate
++		}
++	}
++}
+diff --git a/playback/media3/exoplayer/src/main/kotlin/subtitle/SubtitleTimingOffsetFormats.kt b/playback/media3/exoplayer/src/main/kotlin/subtitle/SubtitleTimingOffsetFormats.kt
+new file mode 100644
+index 0000000..b175dbc
+--- /dev/null
++++ b/playback/media3/exoplayer/src/main/kotlin/subtitle/SubtitleTimingOffsetFormats.kt
+@@ -0,0 +1,14 @@
++package org.jellyfin.playback.media3.exoplayer.subtitle
++
++import androidx.media3.common.Format
++import androidx.media3.common.MimeTypes
++import androidx.media3.common.util.UnstableApi
++
++@UnstableApi
++fun isSubtitleTimingOffsetSupported(format: Format): Boolean = when (format.sampleMimeType) {
++	MimeTypes.APPLICATION_SUBRIP,
++	MimeTypes.TEXT_VTT,
++	MimeTypes.TEXT_SSA,
++	MimeTypes.APPLICATION_TTML -> true
++	else -> false
++}
+diff --git a/playback/media3/exoplayer/src/main/kotlin/subtitle/SubtitleTimingOffsetRenderersFactory.kt b/playback/media3/exoplayer/src/main/kotlin/subtitle/SubtitleTimingOffsetRenderersFactory.kt
+new file mode 100644
+index 0000000..7e094f6
+--- /dev/null
++++ b/playback/media3/exoplayer/src/main/kotlin/subtitle/SubtitleTimingOffsetRenderersFactory.kt
+@@ -0,0 +1,34 @@
++package org.jellyfin.playback.media3.exoplayer.subtitle
++
++import android.content.Context
++import android.os.Looper
++import androidx.media3.common.util.UnstableApi
++import androidx.media3.exoplayer.DefaultRenderersFactory
++import androidx.media3.exoplayer.Renderer
++import androidx.media3.exoplayer.text.TextOutput
++import androidx.media3.exoplayer.text.TextRenderer
++import androidx.media3.extractor.text.SubtitleParser
++
++@UnstableApi
++class SubtitleTimingOffsetRenderersFactory(
++	context: Context,
++	private val offsetState: SubtitleTimingOffsetState,
++	private val subtitleParserFactory: SubtitleParser.Factory,
++) : DefaultRenderersFactory(context) {
++	override fun buildTextRenderers(
++		context: Context,
++		output: TextOutput,
++		outputLooper: Looper,
++		extensionRendererMode: Int,
++		out: ArrayList<Renderer>,
++	) {
++		out += TextRenderer(
++			output,
++			outputLooper,
++			SubtitleTimingOffsetDecoderFactory(subtitleParserFactory, offsetState)
++		).apply {
++			@Suppress("DEPRECATION")
++			experimentalSetLegacyDecodingEnabled(true)
++		}
++	}
++}
+diff --git a/playback/media3/exoplayer/src/main/kotlin/subtitle/SubtitleTimingOffsetState.kt b/playback/media3/exoplayer/src/main/kotlin/subtitle/SubtitleTimingOffsetState.kt
+new file mode 100644
+index 0000000..6b7bd71
+--- /dev/null
++++ b/playback/media3/exoplayer/src/main/kotlin/subtitle/SubtitleTimingOffsetState.kt
+@@ -0,0 +1,37 @@
++package org.jellyfin.playback.media3.exoplayer.subtitle
++
++import androidx.media3.common.util.UnstableApi
++import java.util.concurrent.CopyOnWriteArraySet
++
++@UnstableApi
++class SubtitleTimingOffsetState(initialOffsetUs: Long = 0L) {
++	fun interface Listener {
++		fun onSubtitleTimingOffsetChanged(offsetUs: Long)
++	}
++
++	private val listeners = CopyOnWriteArraySet<Listener>()
++
++	@Volatile
++	private var currentOffsetUs = initialOffsetUs
++
++	val offsetUs: Long
++		get() = currentOffsetUs
++
++	fun setOffsetUs(offsetUs: Long) {
++		currentOffsetUs = offsetUs
++		listeners.forEach { it.onSubtitleTimingOffsetChanged(offsetUs) }
++	}
++
++	fun adjustOffsetUs(deltaUs: Long) {
++		setOffsetUs(currentOffsetUs + deltaUs)
++	}
++
++	fun addListener(listener: Listener) {
++		listeners.add(listener)
++		listener.onSubtitleTimingOffsetChanged(currentOffsetUs)
++	}
++
++	fun removeListener(listener: Listener) {
++		listeners.remove(listener)
++	}
++}
